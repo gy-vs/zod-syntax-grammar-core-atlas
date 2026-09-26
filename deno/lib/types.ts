@@ -545,6 +545,13 @@ export type ZodStringCheck =
       precision: number | null;
       message?: string;
     }
+  | { kind: "date"; message?: string }
+  | {
+      kind: "time";
+      offset: boolean;
+      precision: number | null;
+      message?: string;
+    }
   | { kind: "ip"; version?: IpVersion; message?: string };
 
 export interface ZodStringDef extends ZodTypeDef {
@@ -587,37 +594,34 @@ const ipv4Regex =
 const ipv6Regex =
   /^(([a-f0-9]{1,4}:){7}|::([a-f0-9]{1,4}:){0,6}|([a-f0-9]{1,4}:){1}:([a-f0-9]{1,4}:){0,5}|([a-f0-9]{1,4}:){2}:([a-f0-9]{1,4}:){0,4}|([a-f0-9]{1,4}:){3}:([a-f0-9]{1,4}:){0,3}|([a-f0-9]{1,4}:){4}:([a-f0-9]{1,4}:){0,2}|([a-f0-9]{1,4}:){5}:([a-f0-9]{1,4}:){0,1})([a-f0-9]{1,4}|(((25[0-5])|(2[0-4][0-9])|(1[0-9]{2})|([0-9]{1,2}))\.){3}((25[0-5])|(2[0-4][0-9])|(1[0-9]{2})|([0-9]{1,2})))$/;
 
+const dateRegexSource = `\\d{4}-\\d{2}-\\d{2}`;
+const dateRegex = new RegExp(`^${dateRegexSource}$`);
+
+const timeRegexSource = (args: { precision?: number | null }) => {
+  if (args.precision) {
+    return `\\d{2}:\\d{2}:\\d{2}\\.\\d{${args.precision}}`;
+  } else if (args.precision === 0) {
+    return `\\d{2}:\\d{2}:\\d{2}`;
+  } else {
+    return `\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?`;
+  }
+};
+
+const timeRegex = (args: { precision: number | null; offset: boolean }) => {
+  const time = timeRegexSource(args);
+  if (args.offset) {
+    return new RegExp(`^${time}(([+-]\\d{2}(:?\\d{2})?)|Z)?$`);
+  }
+  return new RegExp(`^${time}(Z)?$`);
+};
+
 // Adapted from https://stackoverflow.com/a/3143231
 const datetimeRegex = (args: { precision: number | null; offset: boolean }) => {
-  if (args.precision) {
-    if (args.offset) {
-      return new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{${args.precision}}(([+-]\\d{2}(:?\\d{2})?)|Z)$`
-      );
-    } else {
-      return new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{${args.precision}}Z$`
-      );
-    }
-  } else if (args.precision === 0) {
-    if (args.offset) {
-      return new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(([+-]\\d{2}(:?\\d{2})?)|Z)$`
-      );
-    } else {
-      return new RegExp(`^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$`);
-    }
-  } else {
-    if (args.offset) {
-      return new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(([+-]\\d{2}(:?\\d{2})?)|Z)$`
-      );
-    } else {
-      return new RegExp(
-        `^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$`
-      );
-    }
+  const datetime = `${dateRegexSource}T${timeRegexSource(args)}`;
+  if (args.offset) {
+    return new RegExp(`^${datetime}(([+-]\\d{2}(:?\\d{2})?)|Z)$`);
   }
+  return new RegExp(`^${datetime}Z$`);
 };
 
 function isValidIP(ip: string, version?: IpVersion) {
@@ -843,6 +847,30 @@ export class ZodString extends ZodType<string, ZodStringDef> {
           });
           status.dirty();
         }
+      } else if (check.kind === "date") {
+        const regex = dateRegex;
+
+        if (!regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode.invalid_string,
+            validation: "date",
+            message: check.message,
+          });
+          status.dirty();
+        }
+      } else if (check.kind === "time") {
+        const regex = timeRegex(check);
+
+        if (!regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode.invalid_string,
+            validation: "time",
+            message: check.message,
+          });
+          status.dirty();
+        }
       } else if (check.kind === "ip") {
         if (!isValidIP(input.data, check.version)) {
           ctx = this._getOrReturnCtx(input, ctx);
@@ -925,6 +953,36 @@ export class ZodString extends ZodType<string, ZodStringDef> {
     }
     return this._addCheck({
       kind: "datetime",
+      precision:
+        typeof options?.precision === "undefined" ? null : options?.precision,
+      offset: options?.offset ?? false,
+      ...errorUtil.errToObj(options?.message),
+    });
+  }
+
+  date(message?: errorUtil.ErrMessage) {
+    return this._addCheck({ kind: "date", ...errorUtil.errToObj(message) });
+  }
+
+  time(
+    options?:
+      | string
+      | {
+          message?: string | undefined;
+          precision?: number | null;
+          offset?: boolean;
+        }
+  ) {
+    if (typeof options === "string") {
+      return this._addCheck({
+        kind: "time",
+        precision: null,
+        offset: false,
+        message: options,
+      });
+    }
+    return this._addCheck({
+      kind: "time",
       precision:
         typeof options?.precision === "undefined" ? null : options?.precision,
       offset: options?.offset ?? false,
@@ -1020,6 +1078,14 @@ export class ZodString extends ZodType<string, ZodStringDef> {
 
   get isDatetime() {
     return !!this._def.checks.find((ch) => ch.kind === "datetime");
+  }
+
+  get isDate() {
+    return !!this._def.checks.find((ch) => ch.kind === "date");
+  }
+
+  get isTime() {
+    return !!this._def.checks.find((ch) => ch.kind === "time");
   }
 
   get isEmail() {
@@ -2357,9 +2423,10 @@ export class ZodObject<
           const syncPairs: any[] = [];
           for (const pair of pairs) {
             const key = await pair.key;
+            const value = await pair.value;
             syncPairs.push({
               key,
-              value: await pair.value,
+              value,
               alwaysSet: pair.alwaysSet,
             });
           }
